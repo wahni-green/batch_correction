@@ -89,37 +89,25 @@ def get_data(filters) -> list[dict]:
 
 	flt_precision = cint(frappe.db.get_default("float_precision")) or 2
 
-	sbe_item_condition = ""
 	sle_item_condition = ""
 	values = {
 		"warehouses": tuple(w.name for w in warehouses),
 		"precision": flt_precision,
 	}
 	if filters.get("item_code"):
-		sbe_item_condition = "AND b.item = %(item_code)s"
 		sle_item_condition = "AND item_code = %(item_code)s"
 		values["item_code"] = filters["item_code"]
+
+	sbe_select = get_sbe_movements_select(filters)
 
 	# Single set-based query computing a running per (warehouse, batch_no) balance
 	# via a window function, instead of re-running the full Stock Ledger report
 	# once per warehouse x batch combination (which made this report time out).
-	# item_code is resolved via a join to Batch rather than the denormalized
-	# column on Serial and Batch Entry, since that column doesn't exist on
-	# sites running an erpnext version older than the "single table" refactor.
 	# nosemgrep: frappe-semgrep-rules.rules.frappe-using-db-sql
 	return frappe.db.sql(
 		f"""
 		WITH movements AS (
-			SELECT
-				sbe.batch_no, sbe.warehouse, b.item AS item_code, sbe.qty AS actual_qty,
-				sbe.posting_datetime, sbe.voucher_type, sbe.voucher_no, sbe.creation, sbe.idx
-			FROM `tabSerial and Batch Entry` sbe
-			INNER JOIN `tabBatch` b ON b.name = sbe.batch_no
-			WHERE sbe.docstatus = 1
-				AND sbe.is_cancelled = 0
-				AND sbe.batch_no IS NOT NULL AND sbe.batch_no != ''
-				AND sbe.warehouse IN %(warehouses)s
-				{sbe_item_condition}
+			{sbe_select}
 
 			UNION ALL
 
@@ -168,6 +156,48 @@ def get_data(filters) -> list[dict]:
 		values,
 		as_dict=True,
 	)
+
+
+def get_sbe_movements_select(filters) -> str:
+	"""Build the Serial and Batch Entry arm of the movements CTE.
+
+	Sites on an erpnext version older than commit f2ad27eb06 ("perf: DN
+	submission with SABB") don't have posting_datetime/voucher_type/voucher_no
+	denormalized onto Serial and Batch Entry, so those fields must instead be
+	pulled from the parent Serial and Batch Bundle. Sites older still (before
+	8d4a179a, "refactor: single table for better performance") also lack
+	item_code/is_cancelled on the entry.
+	"""
+	sbe_columns = set(frappe.db.get_table_columns("Serial and Batch Entry"))
+
+	if {"posting_datetime", "voucher_type", "voucher_no"}.issubset(sbe_columns):
+		cancelled_condition = "AND sbe.is_cancelled = 0" if "is_cancelled" in sbe_columns else ""
+		item_condition = "AND b.item = %(item_code)s" if filters.get("item_code") else ""
+		return f"""
+			SELECT
+				sbe.batch_no, sbe.warehouse, b.item AS item_code, sbe.qty AS actual_qty,
+				sbe.posting_datetime, sbe.voucher_type, sbe.voucher_no, sbe.creation, sbe.idx
+			FROM `tabSerial and Batch Entry` sbe
+			INNER JOIN `tabBatch` b ON b.name = sbe.batch_no
+			WHERE sbe.docstatus = 1
+				{cancelled_condition}
+				AND sbe.batch_no IS NOT NULL AND sbe.batch_no != ''
+				AND sbe.warehouse IN %(warehouses)s
+				{item_condition}
+		"""
+
+	item_condition = "AND sbb.item_code = %(item_code)s" if filters.get("item_code") else ""
+	return f"""
+		SELECT
+			sbe.batch_no, sbe.warehouse, sbb.item_code, sbe.qty AS actual_qty,
+			sbb.posting_datetime, sbb.voucher_type, sbb.voucher_no, sbe.creation, sbe.idx
+		FROM `tabSerial and Batch Entry` sbe
+		INNER JOIN `tabSerial and Batch Bundle` sbb ON sbb.name = sbe.parent
+		WHERE sbb.docstatus = 1
+			AND sbe.batch_no IS NOT NULL AND sbe.batch_no != ''
+			AND sbe.warehouse IN %(warehouses)s
+			{item_condition}
+	"""
 
 
 def get_warehouses(filters):
