@@ -89,31 +89,37 @@ def get_data(filters) -> list[dict]:
 
 	flt_precision = cint(frappe.db.get_default("float_precision")) or 2
 
-	item_condition = ""
+	sbe_item_condition = ""
+	sle_item_condition = ""
 	values = {
 		"warehouses": tuple(w.name for w in warehouses),
 		"precision": flt_precision,
 	}
 	if filters.get("item_code"):
-		item_condition = "AND item_code = %(item_code)s"
+		sbe_item_condition = "AND b.item = %(item_code)s"
+		sle_item_condition = "AND item_code = %(item_code)s"
 		values["item_code"] = filters["item_code"]
 
 	# Single set-based query computing a running per (warehouse, batch_no) balance
 	# via a window function, instead of re-running the full Stock Ledger report
 	# once per warehouse x batch combination (which made this report time out).
+	# item_code is resolved via a join to Batch rather than the denormalized
+	# column on Serial and Batch Entry, since that column doesn't exist on
+	# sites running an erpnext version older than the "single table" refactor.
 	# nosemgrep: frappe-semgrep-rules.rules.frappe-using-db-sql
 	return frappe.db.sql(
 		f"""
 		WITH movements AS (
 			SELECT
-				batch_no, warehouse, item_code, qty AS actual_qty,
-				posting_datetime, voucher_type, voucher_no, creation, idx
-			FROM `tabSerial and Batch Entry`
-			WHERE docstatus = 1
-				AND is_cancelled = 0
-				AND batch_no IS NOT NULL AND batch_no != ''
-				AND warehouse IN %(warehouses)s
-				{item_condition}
+				sbe.batch_no, sbe.warehouse, b.item AS item_code, sbe.qty AS actual_qty,
+				sbe.posting_datetime, sbe.voucher_type, sbe.voucher_no, sbe.creation, sbe.idx
+			FROM `tabSerial and Batch Entry` sbe
+			INNER JOIN `tabBatch` b ON b.name = sbe.batch_no
+			WHERE sbe.docstatus = 1
+				AND sbe.is_cancelled = 0
+				AND sbe.batch_no IS NOT NULL AND sbe.batch_no != ''
+				AND sbe.warehouse IN %(warehouses)s
+				{sbe_item_condition}
 
 			UNION ALL
 
@@ -126,7 +132,7 @@ def get_data(filters) -> list[dict]:
 				AND batch_no IS NOT NULL AND batch_no != ''
 				AND (serial_and_batch_bundle IS NULL OR serial_and_batch_bundle = '')
 				AND warehouse IN %(warehouses)s
-				{item_condition}
+				{sle_item_condition}
 		),
 		running AS (
 			SELECT
