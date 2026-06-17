@@ -194,6 +194,11 @@ def get_sbe_movements_select(filters) -> str:
 		if "posting_datetime" in sbb_columns
 		else "TIMESTAMP(sbb.posting_date, sbb.posting_time)"
 	)
+	# Cancelling a voucher does not cancel its Serial and Batch Bundle (the
+	# bundle is deliberately excluded from the standard cancel cascade) -
+	# instead the bundle is left at docstatus 1 with is_cancelled flipped to 1.
+	# docstatus alone is therefore not enough to exclude cancelled vouchers.
+	cancelled_condition = "AND sbb.is_cancelled = 0" if "is_cancelled" in sbb_columns else ""
 	item_condition = "AND sbb.item_code = %(item_code)s" if filters.get("item_code") else ""
 	return f"""
 		SELECT
@@ -202,6 +207,7 @@ def get_sbe_movements_select(filters) -> str:
 		FROM `tabSerial and Batch Entry` sbe
 		INNER JOIN `tabSerial and Batch Bundle` sbb ON sbb.name = sbe.parent
 		WHERE sbb.docstatus = 1
+			{cancelled_condition}
 			AND sbe.batch_no IS NOT NULL AND sbe.batch_no != ''
 			AND sbe.warehouse IN %(warehouses)s
 			{item_condition}
