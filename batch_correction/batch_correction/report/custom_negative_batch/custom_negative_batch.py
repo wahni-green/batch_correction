@@ -166,7 +166,9 @@ def get_sbe_movements_select(filters) -> str:
 	denormalized onto Serial and Batch Entry, so those fields must instead be
 	pulled from the parent Serial and Batch Bundle. Sites older still (before
 	8d4a179a, "refactor: single table for better performance") also lack
-	item_code/is_cancelled on the entry.
+	item_code/is_cancelled on the entry. erpnext v15 also lacks a combined
+	posting_datetime column on the bundle itself (only posting_date/posting_time),
+	so that case is reconstructed with TIMESTAMP().
 	"""
 	sbe_columns = set(frappe.db.get_table_columns("Serial and Batch Entry"))
 
@@ -186,11 +188,17 @@ def get_sbe_movements_select(filters) -> str:
 				{item_condition}
 		"""
 
+	sbb_columns = set(frappe.db.get_table_columns("Serial and Batch Bundle"))
+	posting_datetime_expr = (
+		"sbb.posting_datetime"
+		if "posting_datetime" in sbb_columns
+		else "TIMESTAMP(sbb.posting_date, sbb.posting_time)"
+	)
 	item_condition = "AND sbb.item_code = %(item_code)s" if filters.get("item_code") else ""
 	return f"""
 		SELECT
 			sbe.batch_no, sbe.warehouse, sbb.item_code, sbe.qty AS actual_qty,
-			sbb.posting_datetime, sbb.voucher_type, sbb.voucher_no, sbe.creation, sbe.idx
+			{posting_datetime_expr} AS posting_datetime, sbb.voucher_type, sbb.voucher_no, sbe.creation, sbe.idx
 		FROM `tabSerial and Batch Entry` sbe
 		INNER JOIN `tabSerial and Batch Bundle` sbb ON sbb.name = sbe.parent
 		WHERE sbb.docstatus = 1
