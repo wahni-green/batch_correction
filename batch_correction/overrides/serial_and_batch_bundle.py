@@ -45,17 +45,19 @@ class CustomSerialandBatchBundle(SerialandBatchBundle):
 			if new_qty >= 0:
 				continue
 
-			is_self_row = (row.batch_no, get_datetime(row.creation)) in self_entry_keys
-
-			if is_self_row and not was_ever_negative:
+			if was_ever_negative:
+				# this batch already has negative history - unchanged
+				# behaviour, governed by "Allow Negative Stock for Batch"
+				self.throw_negative_batch(row.batch_no, new_qty, precision, row.posting_datetime)
+			elif (row.batch_no, get_datetime(row.creation)) in self_entry_keys:
 				# this batch has never gone negative before, and it is this
 				# very transaction that pushes it negative - block outright,
 				# regardless of "Allow Negative Stock for Batch"
 				self.throw_first_time_negative_batch(row.batch_no, new_qty, precision, row.posting_datetime)
 			else:
-				# either this batch already has negative history, or this row
-				# belongs to some other, already-committed transaction -
-				# unchanged behaviour, governed by "Allow Negative Stock for Batch"
+				# some other, already-committed transaction's row turns out to
+				# be the first negative point for this batch - unchanged
+				# behaviour, governed by "Allow Negative Stock for Batch"
 				self.throw_negative_batch(row.batch_no, new_qty, precision, row.posting_datetime)
 
 			ever_negative[row.batch_no] = True
@@ -73,9 +75,7 @@ class CustomSerialandBatchBundle(SerialandBatchBundle):
 			"""
 			The Batch {0} of an item {1}, which has had a non-negative balance until now,
 			would go negative in the warehouse {2}{3}.
-			Please add a stock quantity of {4} to proceed with this entry.
-			'Allow Negative Stock for Batch' in Stock Settings does not apply here -
-			a batch that has never gone negative before is not allowed to go negative now."""
+			Please add a stock quantity of {4} to proceed with this entry."""
 		).format(
 			bold(batch_no),
 			bold(self.item_code),
