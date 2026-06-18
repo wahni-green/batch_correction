@@ -26,9 +26,9 @@ class CustomSerialandBatchBundle(SerialandBatchBundle):
 		# negative always falls back to the Stock Settings toggle, regardless
 		# of whether it is the chronologically "first" negative point or not
 		self_entry_keys = {
-			(entry.batch_no, get_datetime(entry.creation))
+			(entry.batch_no, get_datetime(entry.posting_datetime), get_datetime(entry.creation))
 			for entry in self.entries
-			if entry.batch_no and entry.creation
+			if entry.batch_no and entry.posting_datetime and entry.creation
 		}
 
 		precision = frappe.get_precision("Serial and Batch Entry", "qty")
@@ -49,7 +49,7 @@ class CustomSerialandBatchBundle(SerialandBatchBundle):
 				# this batch already has negative history - unchanged
 				# behaviour, governed by "Allow Negative Stock for Batch"
 				self.throw_negative_batch(row.batch_no, new_qty, precision, row.posting_datetime)
-			elif (row.batch_no, get_datetime(row.creation)) in self_entry_keys:
+			elif (row.batch_no, get_datetime(row.posting_datetime), get_datetime(row.creation)) in self_entry_keys:
 				# this batch has never gone negative before, and it is this
 				# very transaction that pushes it negative - block outright,
 				# regardless of "Allow Negative Stock for Batch"
