@@ -180,6 +180,14 @@ app_license = "agpl-3.0"
 # 	"Task": "batch_correction.custom.task.CustomTaskMixin"
 # }
 
+# Override DocType Class
+# ------------------------------
+#
+# Replace a standard doctype controller with a subclass of it.
+override_doctype_class = {
+	"Serial and Batch Bundle": "batch_correction.overrides.serial_and_batch_bundle.CustomSerialandBatchBundle"
+}
+
 # Overriding Methods
 # ------------------------------
 #
