@@ -75,6 +75,10 @@ class TestComputeHeadroom(unittest.TestCase):
 		self.assertEqual(headroom, 3)
 
 	def test_negative_balance_before_since_gives_zero_headroom(self):
+		# a batch that's already negative before `since` has nothing to
+		# spare -- headroom is floored at 0, not the raw (negative) balance,
+		# since find_donor_allocations only ever treats this as "unavailable"
+		# regardless of how negative it is.
 		s = series(("2026-01-01 10:00:00", -2), ("2026-01-05 10:00:00", 9))
 		headroom = compute_headroom(s, since="2026-01-02 00:00:00", precision=2)
-		self.assertEqual(headroom, -2)
+		self.assertEqual(headroom, 0)

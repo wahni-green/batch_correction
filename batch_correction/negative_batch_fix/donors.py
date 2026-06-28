@@ -25,9 +25,11 @@ def get_candidate_donor_batches(item_code: str, warehouse: str, exclude_batch: s
 
 
 def compute_headroom(series: list[dict], since, precision: int) -> float:
-	"""Lowest balance the batch holds from `since` (inclusive) through to the
-	last entry in `series` -- the most that can be withdrawn at `since` without
-	ever sending this batch negative itself as a side effect of the withdrawal.
+	"""The most that can be withdrawn from this batch at `since` without ever
+	sending it negative itself as a side effect of the withdrawal -- the
+	lowest balance it holds from `since` (inclusive) through to the last
+	entry in `series`, floored at 0 (a batch that's already negative before
+	`since` has nothing to spare, not a negative amount to spare).
 	"""
 	since = get_datetime(since)
 	balance_before = 0.0
@@ -40,7 +42,8 @@ def compute_headroom(series: list[dict], since, precision: int) -> float:
 		else:
 			min_after = qty if min_after is None else min(min_after, qty)
 
-	return min(balance_before, min_after) if min_after is not None else balance_before
+	lowest_balance = min(balance_before, min_after) if min_after is not None else balance_before
+	return max(lowest_balance, 0.0)
 
 
 def find_donor_allocations(

@@ -178,7 +178,27 @@ def fix_one(batch_no: str, warehouse: str, delete_resolved_exceptions: bool = Tr
 	Used both by fix_all() and by the "Fix Negative Batch" button on the
 	Negative Stock Batch Exception form, so a fix triggered from either place
 	always re-checks current data immediately before writing anything.
+
+	Claims the exception row with a `SELECT ... FOR UPDATE` lock before doing
+	anything else: two overlapping calls for the same batch/warehouse (e.g.
+	the button clicked twice, or the button clicked while fix_all() is also
+	running) would otherwise both analyze the same pre-fix snapshot and each
+	submit their own Repack, double-moving stock. The second caller instead
+	blocks here until the first's transaction commits or rolls back, then
+	re-reads -- finding the row already deleted (nothing left to do) if the
+	first succeeded, or free to proceed normally if it didn't.
 	"""
+	exception_name = frappe.db.get_value(
+		"Negative Stock Batch Exception", {"batch_no": batch_no, "warehouse": warehouse}, for_update=True
+	)
+	if not exception_name:
+		return {
+			"batch_no": batch_no,
+			"warehouse": warehouse,
+			"status": "healthy",
+			"message": "No Negative Stock Batch Exception found for this batch/warehouse; nothing to do.",
+		}
+
 	fresh = analyze_exception(batch_no, warehouse)
 	if fresh["status"] != "fixable":
 		return fresh
@@ -210,11 +230,20 @@ def fix_one(batch_no: str, warehouse: str, delete_resolved_exceptions: bool = Tr
 		return fresh
 
 	if delete_resolved_exceptions:
-		exception_name = frappe.db.get_value(
-			"Negative Stock Batch Exception", {"batch_no": batch_no, "warehouse": warehouse}
+		# there's no uniqueness constraint on (batch_no, warehouse) beyond the
+		# autoname convention, so a duplicate could exist (e.g. created via
+		# the standard "New" form rather than create_exception(), or left
+		# behind by a rename) -- clean up every matching row, not just the
+		# one claimed above, so a fixed batch never leaves a stale exception
+		# sitting around.
+		exception_names = frappe.get_all(
+			"Negative Stock Batch Exception",
+			filters={"batch_no": batch_no, "warehouse": warehouse},
+			pluck="name",
 		)
-		if exception_name:
-			frappe.delete_doc("Negative Stock Batch Exception", exception_name, ignore_permissions=True)
+		for name in exception_names:
+			frappe.delete_doc("Negative Stock Batch Exception", name, ignore_permissions=True)
+		if exception_names:
 			fresh["exception_deleted"] = True
 
 	return fresh

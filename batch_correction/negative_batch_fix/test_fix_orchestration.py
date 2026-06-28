@@ -10,7 +10,7 @@ case, needs an actual commit to do it (and is documented there as such).
 """
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import frappe
 
@@ -122,6 +122,82 @@ class TestFixAllTransactionHandling(unittest.TestCase):
 		fix_one_mock.assert_not_called()
 		self.assertEqual(calls, [])
 		self.assertEqual(results, [plan])
+
+	def test_fix_one_is_a_noop_when_no_exception_exists(self):
+		# fix_one() claims the exception row with a real (unmocked) SELECT ...
+		# FOR UPDATE before doing anything else, so two overlapping calls for
+		# the same batch/warehouse can't both analyze the same pre-fix
+		# snapshot and each submit their own Repack: the second blocks until
+		# the first's transaction ends, then re-reads -- finding the row
+		# already gone if the first succeeded. This covers that "already
+		# gone" half of the contract (and that analyze_exception() is never
+		# even reached in that case); the actual cross-connection blocking
+		# was verified manually against this site rather than as an
+		# automated test, since it needs two real, separate DB connections.
+		with patch.object(fix_module, "analyze_exception") as analyze_mock:
+			result = fix_module.fix_one("NO-SUCH-BATCH-XYZ", "NO-SUCH-WAREHOUSE-XYZ")
+
+		analyze_mock.assert_not_called()
+		self.assertEqual(result["status"], "healthy")
+		self.assertEqual(result["batch_no"], "NO-SUCH-BATCH-XYZ")
+		self.assertEqual(result["warehouse"], "NO-SUCH-WAREHOUSE-XYZ")
+
+	def test_fix_one_deletes_every_duplicate_exception_row(self):
+		# (batch_no, warehouse) has no DB-level uniqueness beyond the autoname
+		# convention -- a duplicate can exist if one was created via the
+		# standard "New" form (bypassing create_exception()'s own dedup
+		# check) or left behind by a rename. Real rows are used here (rather
+		# than mocking frappe.get_all/delete_doc) so this also covers the
+		# actual filter matching them; analyze_exception()/create_repack_entry
+		# are mocked since the repack mechanics themselves are covered
+		# elsewhere and aren't the point of this test.
+		batch_no, warehouse = "DUPTEST-BATCH", "DUPTEST-WH"
+
+		first = frappe.get_doc(
+			doctype="Negative Stock Batch Exception", batch_no=batch_no, warehouse=warehouse
+		)
+		first.flags.ignore_links = True
+		first.insert(ignore_permissions=True)
+		frappe.rename_doc("Negative Stock Batch Exception", first.name, "DUPTEST-RENAMED", force=True)
+
+		second = frappe.get_doc(
+			doctype="Negative Stock Batch Exception", batch_no=batch_no, warehouse=warehouse
+		)
+		second.flags.ignore_links = True
+		second.insert(ignore_permissions=True)
+		frappe.db.commit()
+		self.addCleanup(
+			lambda: (
+				frappe.db.delete("Negative Stock Batch Exception", {"batch_no": batch_no}),
+				frappe.db.commit(),
+			)
+		)
+
+		fixable_plan = {
+			"batch_no": batch_no,
+			"warehouse": warehouse,
+			"item_code": "ITEM",
+			"company": "COMPANY",
+			"status": "fixable",
+			"deficit": 5,
+			"allocations": [],
+			"posting_datetime": frappe.utils.now_datetime(),
+		}
+		healthy_plan = dict(fixable_plan, status="healthy")
+		fake_stock_entry = MagicMock()
+		fake_stock_entry.name = "STE-TEST"
+
+		with (
+			patch.object(
+				fix_module, "analyze_exception", side_effect=[dict(fixable_plan), dict(healthy_plan)]
+			),
+			patch.object(fix_module, "create_repack_entry", return_value=fake_stock_entry),
+		):
+			result = fix_module.fix_one(batch_no, warehouse)
+
+		self.assertEqual(result["status"], "fixed")
+		self.assertTrue(result["exception_deleted"])
+		self.assertEqual(frappe.get_all("Negative Stock Batch Exception", filters={"batch_no": batch_no}), [])
 
 	def test_dry_run_logs_and_commits_on_analysis_failure(self):
 		exceptions = [make_exception_row("EXC-1", "BATCH-1")]
