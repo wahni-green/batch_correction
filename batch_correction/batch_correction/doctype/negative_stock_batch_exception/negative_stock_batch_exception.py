@@ -5,6 +5,8 @@ import frappe
 from frappe import _, bold
 from frappe.model.document import Document
 
+from batch_correction.negative_batch_fix.fix import analyze_exception, fix_all, fix_one
+
 
 class NegativeStockBatchException(Document):
 	pass
@@ -46,3 +48,29 @@ def create_exception(
 		indicator="green",
 	)
 	return doc.name
+
+
+@frappe.whitelist()
+def get_fix_plan(name: str) -> dict:
+	doc = frappe.get_doc("Negative Stock Batch Exception", name)
+	doc.check_permission("read")
+	return analyze_exception(doc.batch_no, doc.warehouse)
+
+
+@frappe.whitelist()
+def fix_negative_batch(name: str) -> dict:
+	doc = frappe.get_doc("Negative Stock Batch Exception", name)
+	doc.check_permission("write")
+	return fix_one(doc.batch_no, doc.warehouse)
+
+
+@frappe.whitelist()
+def fix_all_negative_batches() -> list[dict]:
+	"""Bulk equivalent of fix_negative_batch, for the "Fix All Negative
+	Batches" button on Stock Settings -- there's no single document to call
+	check_permission() on here, so this checks doctype-level permission
+	instead.
+	"""
+	if not frappe.has_permission("Negative Stock Batch Exception", "write"):
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+	return fix_all()
