@@ -218,19 +218,14 @@ def fix_one(batch_no: str, warehouse: str, delete_resolved_exceptions: bool = Tr
 	if fresh["status"] != "fixable":
 		return fresh
 
-	stock_entry = create_repack_entry(
-		fresh["company"],
-		fresh["warehouse"],
-		fresh["item_code"],
-		fresh["batch_no"],
-		fresh["deficit"],
-		fresh["allocations"],
-		fresh["posting_datetime"],
-	)
-	stock_entry.insert()
-	stock_entry.submit()
-	fresh["stock_entry"] = stock_entry.name
-
+	# Submit reversal entries FIRST (at recovery_time+1s) so the future
+	# "return of stock" is already in the ledger before we submit the
+	# backdated forward repack.  When ERPNext validates the forward repack it
+	# reposts the full timeline and sees the donor's stock returned before any
+	# later depletion -- preventing a false negative-stock error on the donor.
+	# The deficit batch (source_batch in the reversal) is allowed to go
+	# temporarily more negative here because it has a Negative Stock Batch
+	# Exception; the forward repack's repost immediately corrects that.
 	if fresh.get("reversal_datetime"):
 		reversal_entries = create_reversal_entries(
 			fresh["company"],
@@ -244,6 +239,19 @@ def fix_one(batch_no: str, warehouse: str, delete_resolved_exceptions: bool = Tr
 			reversal_entry.insert()
 			reversal_entry.submit()
 		fresh["reversal_stock_entries"] = [e.name for e in reversal_entries]
+
+	stock_entry = create_repack_entry(
+		fresh["company"],
+		fresh["warehouse"],
+		fresh["item_code"],
+		fresh["batch_no"],
+		fresh["deficit"],
+		fresh["allocations"],
+		fresh["posting_datetime"],
+	)
+	stock_entry.insert()
+	stock_entry.submit()
+	fresh["stock_entry"] = stock_entry.name
 
 	fresh["status"] = "fixed"
 
