@@ -115,7 +115,7 @@ class TestComputeHeadroom(unittest.TestCase):
 		self.assertEqual(headroom, 0)
 
 	def test_until_excludes_later_depletion(self):
-		# A donor holds 10 through the bridge window (day 1–3) but drops to 0
+		# A donor holds 10 through the bridge window (day 1-3) but drops to 0
 		# by day 5 (fully consumed).  Without `until` the headroom would be 0;
 		# with `until=day 3` it is correctly 10 -- the reversal repack at
 		# recovery_time+1s returns the stock before the donor is depleted.
