@@ -75,13 +75,28 @@ def analyze_exception(batch_no: str, warehouse: str) -> dict:
 	t0, deficit, recovery_time = window
 	posting_datetime = add_to_date(t0, seconds=-1)
 
-	# Limit the headroom check to the bridge window (T0 → recovery_time) when
-	# the batch recovers naturally: the reversal repack at recovery_time+1s
-	# returns the borrowed stock to each donor, so donors only need to hold the
-	# stock for that short window -- not from T0 through today.
+	# The reversal repack is submitted BEFORE the forward repack so that
+	# ERPNext's validation for the forward repack sees the "return of stock"
+	# event already in the ledger.  This means the reversal must be posted at a
+	# time when the deficit batch itself has enough balance to spare deficit qty
+	# without going negative -- otherwise the reversal submission would fail.
+	#
+	# recovery_time is the first row >= 0; that balance may be lower than
+	# deficit (e.g. recovered to exactly 0).  Scan forward for the first row
+	# where qty_after_transaction >= deficit: that is safe_reversal_time.
+	# If no such row exists the bridge cannot be done and we fall back to a
+	# full-history donor search (no reversal, same as the no-recovery path).
+	safe_reversal_time = None
+	if recovery_time is not None:
+		for row in series:
+			row_dt = get_datetime(row.date)
+			if row_dt > t0 and flt(row.qty_after_transaction, precision) >= flt(deficit, precision):
+				safe_reversal_time = row_dt
+				break
+
 	allocations, shortfall = find_donor_allocations(
 		item_code, warehouse, company, batch_no, posting_datetime, deficit, precision,
-		until=recovery_time,
+		until=safe_reversal_time,
 	)
 
 	if shortfall > 0:
@@ -104,9 +119,9 @@ def analyze_exception(batch_no: str, warehouse: str) -> dict:
 		"posting_datetime": posting_datetime,
 		"allocations": allocations,
 	}
-	if recovery_time is not None:
+	if safe_reversal_time is not None:
 		result["recovery_time"] = recovery_time
-		result["reversal_datetime"] = add_to_date(recovery_time, seconds=1)
+		result["reversal_datetime"] = add_to_date(safe_reversal_time, seconds=1)
 	return result
 
 
