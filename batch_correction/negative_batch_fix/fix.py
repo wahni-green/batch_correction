@@ -45,7 +45,7 @@ partial writes behind for some later, unrelated commit to pick up.
 """
 
 import frappe
-from frappe.utils import add_to_date, get_datetime
+from frappe.utils import add_to_date, flt, get_datetime
 
 from batch_correction.negative_batch_fix.analyzer import (
 	find_negative_window,
