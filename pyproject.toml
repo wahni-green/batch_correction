@@ -4,7 +4,7 @@ authors = [
     { name = "Wahni IT Solutions Pvt Ltd", email = "danyrt@wahni.com"}
 ]
 description = "Batch Correction"
-requires-python = ">=3.14"
+requires-python = ">=3.10"
 readme = "README.md"
 dynamic = ["version"]
 dependencies = [

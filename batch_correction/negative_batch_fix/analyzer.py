@@ -38,20 +38,20 @@ def get_batch_balance_series(item_code: str, warehouse: str, batch_no: str, comp
 	return [row for row in data if row.get("voucher_no")]
 
 
-def find_negative_window(series: list[dict], precision: int) -> tuple[object, float] | None:
-	"""Find the point a batch first went negative, and the deficit needed to
-	keep it non-negative for the rest of the series.
+def find_negative_window(series: list[dict], precision: int) -> tuple | None:
+	"""Return (t0, deficit, recovery_time) for the first negative window, or None.
 
-	Returns (t0, deficit) where `t0` is the posting datetime of the first
-	transaction that took the running balance negative, and `deficit` is the
-	quantity that must be injected at (or just before) `t0` to keep the running
-	balance non-negative from `t0` through the end of the series. Returns None
-	if the series never goes negative.
-
-	A single injection at `t0` sized to `deficit` is always enough, even if the
-	balance dips deeper later after recovering in between: qty_after_transaction
-	is a running sum, so adding a constant at `t0` shifts every later balance by
-	that same constant amount, regardless of the path in between.
+	t0:            posting datetime of the first transaction that took the balance negative.
+	deficit:       minimum quantity that must be injected just before t0 to keep the
+	               balance non-negative through the first natural recovery.  Sized to the
+	               deepest trough between t0 and recovery_time (the first-window trough),
+	               not the global series minimum -- the bridge reversal at recovery_time+1s
+	               restores the donor's stock, so subsequent windows are handled separately
+	               (the verify pass in fix_one catches any that remain).
+	               When recovery_time is None (batch never recovers) the global trough is
+	               used instead, since no reversal is possible and the full deficit applies.
+	recovery_time: datetime of the first entry after t0 where the running balance returns
+	               to >= 0, or None if the batch never recovers within the series.
 	"""
 	t0_index = None
 	for i, row in enumerate(series):
@@ -62,6 +62,20 @@ def find_negative_window(series: list[dict], precision: int) -> tuple[object, fl
 	if t0_index is None:
 		return None
 
-	trough = min(flt(row.qty_after_transaction, precision) for row in series[t0_index:])
 	t0 = get_datetime(series[t0_index].date)
-	return t0, abs(trough)
+
+	recovery_index = None
+	for i, row in enumerate(series[t0_index + 1:], start=t0_index + 1):
+		if flt(row.qty_after_transaction, precision) >= 0:
+			recovery_index = i
+			break
+
+	if recovery_index is not None:
+		window_rows = series[t0_index:recovery_index]
+		recovery_time = get_datetime(series[recovery_index].date)
+	else:
+		window_rows = series[t0_index:]
+		recovery_time = None
+
+	trough = min(flt(row.qty_after_transaction, precision) for row in window_rows)
+	return t0, abs(trough), recovery_time

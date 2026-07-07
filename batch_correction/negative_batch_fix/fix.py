@@ -53,7 +53,7 @@ from batch_correction.negative_batch_fix.analyzer import (
 	get_qty_precision,
 )
 from batch_correction.negative_batch_fix.donors import find_donor_allocations
-from batch_correction.negative_batch_fix.repack import create_repack_entry
+from batch_correction.negative_batch_fix.repack import create_repack_entry, create_reversal_entry
 
 
 def analyze_exception(batch_no: str, warehouse: str) -> dict:
@@ -72,11 +72,16 @@ def analyze_exception(batch_no: str, warehouse: str) -> dict:
 			"message": "No negative balance found in the ledger; exception may be stale.",
 		}
 
-	t0, deficit = window
+	t0, deficit, recovery_time = window
 	posting_datetime = add_to_date(t0, seconds=-1)
 
+	# Limit the headroom check to the bridge window (T0 → recovery_time) when
+	# the batch recovers naturally: the reversal repack at recovery_time+1s
+	# returns the borrowed stock to each donor, so donors only need to hold the
+	# stock for that short window -- not from T0 through today.
 	allocations, shortfall = find_donor_allocations(
-		item_code, warehouse, company, batch_no, posting_datetime, deficit, precision
+		item_code, warehouse, company, batch_no, posting_datetime, deficit, precision,
+		until=recovery_time,
 	)
 
 	if shortfall > 0:
@@ -92,13 +97,17 @@ def analyze_exception(batch_no: str, warehouse: str) -> dict:
 			),
 		}
 
-	return plan | {
+	result = plan | {
 		"status": "fixable",
 		"t0": t0,
 		"deficit": deficit,
 		"posting_datetime": posting_datetime,
 		"allocations": allocations,
 	}
+	if recovery_time is not None:
+		result["recovery_time"] = recovery_time
+		result["reversal_datetime"] = add_to_date(recovery_time, seconds=1)
+	return result
 
 
 def _safe_analyze(batch_no: str, warehouse: str) -> dict:
@@ -214,9 +223,23 @@ def fix_one(batch_no: str, warehouse: str, delete_resolved_exceptions: bool = Tr
 	)
 	stock_entry.insert()
 	stock_entry.submit()
+	fresh["stock_entry"] = stock_entry.name
+
+	if fresh.get("reversal_datetime"):
+		reversal_entry = create_reversal_entry(
+			fresh["company"],
+			fresh["warehouse"],
+			fresh["item_code"],
+			fresh["batch_no"],
+			fresh["deficit"],
+			fresh["allocations"],
+			fresh["reversal_datetime"],
+		)
+		reversal_entry.insert()
+		reversal_entry.submit()
+		fresh["reversal_stock_entry"] = reversal_entry.name
 
 	fresh["status"] = "fixed"
-	fresh["stock_entry"] = stock_entry.name
 
 	frappe.logger("batch_correction").info(
 		f"Fixed negative batch {fresh['batch_no']} in {fresh['warehouse']} via {stock_entry.name}: "
