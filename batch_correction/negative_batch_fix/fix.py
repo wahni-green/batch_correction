@@ -53,7 +53,7 @@ from batch_correction.negative_batch_fix.analyzer import (
 	get_qty_precision,
 )
 from batch_correction.negative_batch_fix.donors import find_donor_allocations
-from batch_correction.negative_batch_fix.repack import create_repack_entry
+from batch_correction.negative_batch_fix.repack import create_repack_entry, create_reversal_entries
 
 
 def analyze_exception(batch_no: str, warehouse: str) -> dict:
@@ -72,11 +72,16 @@ def analyze_exception(batch_no: str, warehouse: str) -> dict:
 			"message": "No negative balance found in the ledger; exception may be stale.",
 		}
 
-	t0, deficit = window
+	t0, deficit, recovery_time = window
 	posting_datetime = add_to_date(t0, seconds=-1)
 
+	# Limit the headroom check to the bridge window (T0 → recovery_time) when
+	# the batch recovers naturally: the reversal repack at recovery_time+1s
+	# returns the borrowed stock to each donor, so donors only need to hold the
+	# stock for that short window -- not from T0 through today.
 	allocations, shortfall = find_donor_allocations(
-		item_code, warehouse, company, batch_no, posting_datetime, deficit, precision
+		item_code, warehouse, company, batch_no, posting_datetime, deficit, precision,
+		until=recovery_time,
 	)
 
 	if shortfall > 0:
@@ -92,13 +97,17 @@ def analyze_exception(batch_no: str, warehouse: str) -> dict:
 			),
 		}
 
-	return plan | {
+	result = plan | {
 		"status": "fixable",
 		"t0": t0,
 		"deficit": deficit,
 		"posting_datetime": posting_datetime,
 		"allocations": allocations,
 	}
+	if recovery_time is not None:
+		result["recovery_time"] = recovery_time
+		result["reversal_datetime"] = add_to_date(recovery_time, seconds=1)
+	return result
 
 
 def _safe_analyze(batch_no: str, warehouse: str) -> dict:
@@ -139,6 +148,12 @@ def fix_all(delete_resolved_exceptions: bool = True) -> list[dict]:
 	partway through (e.g. the Repack inserted but failing to submit) is rolled
 	back before moving on, so a caught exception here can never leave partial
 	writes to be committed by whatever calls fix_all().
+
+	Batches with multiple negative windows are fixed one window per pass: the
+	bridge only covers the first window, the verify step detects a remaining
+	window (or a still-pending async repost) and returns "fixed_but_unverified",
+	leaving the exception row in place.  Re-run fix_all() after the repost
+	completes to drain subsequent windows.
 	"""
 	exceptions = frappe.get_all("Negative Stock Batch Exception", fields=["batch_no", "warehouse"])
 
@@ -214,9 +229,23 @@ def fix_one(batch_no: str, warehouse: str, delete_resolved_exceptions: bool = Tr
 	)
 	stock_entry.insert()
 	stock_entry.submit()
+	fresh["stock_entry"] = stock_entry.name
+
+	if fresh.get("reversal_datetime"):
+		reversal_entries = create_reversal_entries(
+			fresh["company"],
+			fresh["warehouse"],
+			fresh["item_code"],
+			fresh["batch_no"],
+			fresh["allocations"],
+			fresh["reversal_datetime"],
+		)
+		for reversal_entry in reversal_entries:
+			reversal_entry.insert()
+			reversal_entry.submit()
+		fresh["reversal_stock_entries"] = [e.name for e in reversal_entries]
 
 	fresh["status"] = "fixed"
-	fresh["stock_entry"] = stock_entry.name
 
 	frappe.logger("batch_correction").info(
 		f"Fixed negative batch {fresh['batch_no']} in {fresh['warehouse']} via {stock_entry.name}: "
@@ -224,9 +253,24 @@ def fix_one(batch_no: str, warehouse: str, delete_resolved_exceptions: bool = Tr
 	)
 
 	verify = analyze_exception(fresh["batch_no"], fresh["warehouse"])
+	if verify["status"] == "fixable":
+		# The batch still has a negative window.  Two normal causes: (a) ERPNext's
+		# repost is async and hasn't recalculated the ledger yet, or (b) the batch
+		# has a second negative window after the first recovery -- the bridge only
+		# fixes one window per pass.  In both cases the exception row is left in
+		# place so fix_all() can be re-run once the repost completes.
+		fresh["status"] = "fixed_but_unverified"
+		fresh["message"] = (
+			"Repack submitted, but the ledger still shows a negative balance. "
+			"This is expected if ERPNext's repost is still pending or if the batch "
+			"has a second negative window -- re-run fix_all() after the repost completes."
+		)
+		return fresh
 	if verify["status"] != "healthy":
 		fresh["status"] = "fixed_but_unverified"
-		fresh["message"] = "Repack submitted but the batch still shows a negative balance; needs review."
+		fresh["message"] = (
+			f"Repack submitted but post-fix analysis returned status '{verify['status']}'; needs review."
+		)
 		return fresh
 
 	if delete_resolved_exceptions:

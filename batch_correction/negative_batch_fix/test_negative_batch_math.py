@@ -25,24 +25,55 @@ class TestFindNegativeWindow(unittest.TestCase):
 		s = series(("2026-01-01 10:00:00", 5), ("2026-01-02 10:00:00", 2))
 		self.assertIsNone(find_negative_window(s, precision=2))
 
-	def test_simple_dip(self):
+	def test_simple_dip_no_recovery(self):
+		# Single dip at the end of the series -- no later row recovers it.
 		s = series(("2026-01-01 10:00:00", 5), ("2026-01-02 10:00:00", -3))
-		t0, deficit = find_negative_window(s, precision=2)
+		t0, deficit, recovery_time = find_negative_window(s, precision=2)
 		self.assertEqual(str(t0), "2026-01-02 10:00:00")
 		self.assertEqual(deficit, 3)
+		self.assertIsNone(recovery_time)
 
-	def test_deeper_dip_after_recovery_sizes_to_worst_point(self):
-		# goes negative at step 2 (-3), recovers at step 3 (+2), then dips deeper
-		# at step 4 (-10): a fix sized only to the first dip would not be enough.
+	def test_dip_with_natural_recovery(self):
+		# Goes negative then recovers: recovery_time points at the recovery row.
+		s = series(
+			("2026-01-01 10:00:00", 5),
+			("2026-01-02 10:00:00", -3),
+			("2026-01-03 10:00:00", 2),
+		)
+		t0, deficit, recovery_time = find_negative_window(s, precision=2)
+		self.assertEqual(str(t0), "2026-01-02 10:00:00")
+		self.assertEqual(deficit, 3)
+		self.assertEqual(str(recovery_time), "2026-01-03 10:00:00")
+
+	def test_second_deeper_dip_after_recovery_does_not_affect_first_window_deficit(self):
+		# First window: negative at day 2 (-3), recovers at day 3 (+2).
+		# Second window starts at day 4 (-10) -- that's a separate bridge pass.
+		# deficit is sized to the FIRST window only (3, not 10): the reversal
+		# at recovery_time+1s ends the bridge, so subsequent windows are detected
+		# by the verify pass in fix_one and handled on the next iteration.
 		s = series(
 			("2026-01-01 10:00:00", 5),
 			("2026-01-02 10:00:00", -3),
 			("2026-01-03 10:00:00", 2),
 			("2026-01-04 10:00:00", -10),
 		)
-		t0, deficit = find_negative_window(s, precision=2)
+		t0, deficit, recovery_time = find_negative_window(s, precision=2)
+		self.assertEqual(str(t0), "2026-01-02 10:00:00")
+		self.assertEqual(deficit, 3)
+		self.assertEqual(str(recovery_time), "2026-01-03 10:00:00")
+
+	def test_no_recovery_uses_global_trough(self):
+		# When the batch never recovers, deficit must cover the deepest point
+		# (no bridge reversal is possible, so a permanent donor is required).
+		s = series(
+			("2026-01-01 10:00:00", 5),
+			("2026-01-02 10:00:00", -3),
+			("2026-01-03 10:00:00", -10),
+		)
+		t0, deficit, recovery_time = find_negative_window(s, precision=2)
 		self.assertEqual(str(t0), "2026-01-02 10:00:00")
 		self.assertEqual(deficit, 10)
+		self.assertIsNone(recovery_time)
 
 	def test_dip_within_rounding_precision_is_not_negative(self):
 		s = series(("2026-01-01 10:00:00", 5), ("2026-01-02 10:00:00", -0.001))
@@ -82,3 +113,30 @@ class TestComputeHeadroom(unittest.TestCase):
 		s = series(("2026-01-01 10:00:00", -2), ("2026-01-05 10:00:00", 9))
 		headroom = compute_headroom(s, since="2026-01-02 00:00:00", precision=2)
 		self.assertEqual(headroom, 0)
+
+	def test_until_excludes_later_depletion(self):
+		# A donor holds 10 through the bridge window (day 1-3) but drops to 0
+		# by day 5 (fully consumed).  Without `until` the headroom would be 0;
+		# with `until=day 3` it is correctly 10 -- the reversal repack at
+		# recovery_time+1s returns the stock before the donor is depleted.
+		s = series(
+			("2026-01-01 10:00:00", 10),
+			("2026-01-05 10:00:00", 0),
+		)
+		self.assertEqual(compute_headroom(s, since="2026-01-01 10:00:01", precision=2), 0)
+		self.assertEqual(
+			compute_headroom(s, since="2026-01-01 10:00:01", precision=2, until="2026-01-03 00:00:00"),
+			10,
+		)
+
+	def test_until_boundary_row_is_included(self):
+		# A row exactly at `until` is inside the window (the reversal is 1s later).
+		s = series(
+			("2026-01-01 10:00:00", 20),
+			("2026-01-03 10:00:00", 5),
+			("2026-01-05 10:00:00", 0),
+		)
+		headroom = compute_headroom(
+			s, since="2026-01-01 10:00:01", precision=2, until="2026-01-03 10:00:00"
+		)
+		self.assertEqual(headroom, 5)

@@ -5,6 +5,19 @@ import frappe
 from frappe.utils import get_datetime
 
 
+def _make_repack_header(company: str, posting_datetime) -> "frappe.model.document.Document":
+	"""Return a bare Repack Stock Entry with header fields set and no item rows."""
+	posting_datetime = get_datetime(posting_datetime)
+	se = frappe.new_doc("Stock Entry")
+	se.stock_entry_type = "Repack"
+	se.purpose = "Repack"
+	se.company = company
+	se.set_posting_time = 1
+	se.posting_date = posting_datetime.date()
+	se.posting_time = posting_datetime.time()
+	return se
+
+
 def create_repack_entry(
 	company: str,
 	warehouse: str,
@@ -22,19 +35,11 @@ def create_repack_entry(
 	(target) row as the weighted average of consumed value -- so total
 	inventory value is preserved, not created or destroyed.
 	"""
-	posting_datetime = get_datetime(posting_datetime)
 	stock_uom = frappe.db.get_value("Item", item_code, "stock_uom")
-
-	stock_entry = frappe.new_doc("Stock Entry")
-	stock_entry.stock_entry_type = "Repack"
-	stock_entry.purpose = "Repack"
-	stock_entry.company = company
-	stock_entry.set_posting_time = 1
-	stock_entry.posting_date = posting_datetime.date()
-	stock_entry.posting_time = posting_datetime.time()
+	se = _make_repack_header(company, posting_datetime)
 
 	for donor_batch, qty in donor_allocations:
-		stock_entry.append(
+		se.append(
 			"items",
 			{
 				"item_code": item_code,
@@ -48,7 +53,7 @@ def create_repack_entry(
 			},
 		)
 
-	stock_entry.append(
+	se.append(
 		"items",
 		{
 			"item_code": item_code,
@@ -62,4 +67,62 @@ def create_repack_entry(
 		},
 	)
 
-	return stock_entry
+	return se
+
+
+def create_reversal_entries(
+	company: str,
+	warehouse: str,
+	item_code: str,
+	source_batch: str,
+	donor_allocations: list[tuple[str, float]],
+	posting_datetime,
+) -> list["frappe.model.document.Document"]:
+	"""Build (but do not insert/submit) the reversal half of a bridge fix as
+	one Repack per donor allocation.
+
+	The deficit batch (source_batch) gives back the borrowed stock to each
+	donor batch at posting_datetime (recovery_time + 1s).  One separate Repack
+	is created per donor so every entry has a single source row and a single
+	target row -- matching ERPNext's expected Repack costing model (multiple
+	raw-material sources feeding one finished-goods target).  Merging donors
+	into one entry with multiple targets would leave ERPNext unable to
+	distribute the source valuation correctly across the targets.
+
+	This leaves every donor's long-term balance unchanged and keeps total item
+	inventory at zero net impact.
+	"""
+	stock_uom = frappe.db.get_value("Item", item_code, "stock_uom")
+	entries = []
+
+	for donor_batch, qty in donor_allocations:
+		se = _make_repack_header(company, posting_datetime)
+		se.append(
+			"items",
+			{
+				"item_code": item_code,
+				"s_warehouse": warehouse,
+				"qty": qty,
+				"uom": stock_uom,
+				"stock_uom": stock_uom,
+				"conversion_factor": 1,
+				"batch_no": source_batch,
+				"use_serial_batch_fields": 1,
+			},
+		)
+		se.append(
+			"items",
+			{
+				"item_code": item_code,
+				"t_warehouse": warehouse,
+				"qty": qty,
+				"uom": stock_uom,
+				"stock_uom": stock_uom,
+				"conversion_factor": 1,
+				"batch_no": donor_batch,
+				"use_serial_batch_fields": 1,
+			},
+		)
+		entries.append(se)
+
+	return entries

@@ -24,25 +24,30 @@ def get_candidate_donor_batches(item_code: str, warehouse: str, exclude_batch: s
 	]
 
 
-def compute_headroom(series: list[dict], since, precision: int) -> float:
+def compute_headroom(series: list[dict], since, precision: int, until=None) -> float:
 	"""The most that can be withdrawn from this batch at `since` without ever
-	sending it negative itself as a side effect of the withdrawal -- the
-	lowest balance it holds from `since` (inclusive) through to the last
-	entry in `series`, floored at 0 (a batch that's already negative before
-	`since` has nothing to spare, not a negative amount to spare).
+	sending it negative during the window [since, until] (or through the end of
+	the series when until is None).
+
+	`balance_before` (the last recorded balance before `since`) is included in
+	the minimum because inserting a new row at `since` shifts that carried-forward
+	balance too.  Floored at 0: a batch that is already negative at `since` has
+	nothing to spare.
 	"""
 	since = get_datetime(since)
+	until = get_datetime(until) if until is not None else None
 	balance_before = 0.0
-	min_after = None
+	min_in_window = None
 
 	for row in series:
 		qty = flt(row.qty_after_transaction, precision)
-		if get_datetime(row.date) < since:
+		row_dt = get_datetime(row.date)
+		if row_dt < since:
 			balance_before = qty
-		else:
-			min_after = qty if min_after is None else min(min_after, qty)
+		elif until is None or row_dt <= until:
+			min_in_window = qty if min_in_window is None else min(min_in_window, qty)
 
-	lowest_balance = min(balance_before, min_after) if min_after is not None else balance_before
+	lowest_balance = min(balance_before, min_in_window) if min_in_window is not None else balance_before
 	return max(lowest_balance, 0.0)
 
 
@@ -54,6 +59,7 @@ def find_donor_allocations(
 	since,
 	deficit: float,
 	precision: int,
+	until=None,
 ) -> tuple[list[tuple[str, float]], float]:
 	"""Greedily allocate `deficit` across donor batches, largest headroom first.
 
@@ -63,7 +69,7 @@ def find_donor_allocations(
 	candidates = []
 	for batch_no in get_candidate_donor_batches(item_code, warehouse, exclude_batch):
 		series = get_batch_balance_series(item_code, warehouse, batch_no, company)
-		headroom = compute_headroom(series, since, precision)
+		headroom = compute_headroom(series, since, precision, until=until)
 		if flt(headroom, precision) > 0:
 			candidates.append((batch_no, headroom))
 
